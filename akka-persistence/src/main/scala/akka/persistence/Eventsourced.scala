@@ -236,6 +236,36 @@ private[persistence] trait Eventsourced extends ProcessorImpl {
   }
 
   /**
+   * Defer the handler execution until all pending stashing handlers have been executed.
+   * Allows to define logic within the actor, which will respect the invocation-order-guarantee
+   * in respect to `persist` calls. That is, if `persist` was invoked before sync,
+   * the corresponding handlers will be invoked in the same order as they were registered in.
+   *
+   * This call will NOT result in `event` being persisted, please use `persist` or `persistAsync`,
+   * if the given event should possible to replay.
+   *
+   * If there are no pending persist handler calls, the handler will be called immediately.
+   *
+   * In the event of persistence failures (indicated by [[PersistenceFailure]] messages being sent to the
+   * [[PersistentActor]], you can handle these messages, which in turn will enable the deferred handlers to run afterwards.
+   * If persistence failure messages are left `unhandled`, the default behavior is to stop the Actor, thus the handlers
+   * will not be run.
+   *
+   * @param event event to be handled in the future, when preceding persist operations have been processes
+   * @param handler handler for the given `event`
+   */
+  final def sync[A](event: A)(handler: A ⇒ Unit): Unit = {
+    if (pendingInvocations.isEmpty) {
+      handler(event)
+    } else {
+      pendingStashingPersistInvocations += 1
+      pendingInvocations addLast StashingHandlerInvocation(event, handler.asInstanceOf[Any ⇒ Unit])
+      resequenceableEventBatch = NonPersistentRepr(event, sender()) :: resequenceableEventBatch
+      useProcessorBatching = false
+    }
+  }
+
+  /**
    * Asynchronously persists `events` in specified order. This is equivalent to calling
    * `persist[A](event: A)(handler: A => Unit)` multiple times with the same `handler`,
    * except that `events` are persisted atomically with this method.
